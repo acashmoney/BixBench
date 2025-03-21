@@ -67,7 +67,7 @@ def load_raw_data(path: str) -> pd.DataFrame:
     return raw_data
 
 
-async def process_trajectories(df: pd.DataFrame) -> pd.DataFrame:
+async def process_trajectories(df: pd.DataFrame, max_concurrent: int = 5) -> pd.DataFrame:
     """
     Create a gradable dataframe from a raw dataframe of trajectories.
 
@@ -76,12 +76,13 @@ async def process_trajectories(df: pd.DataFrame) -> pd.DataFrame:
 
     Args:
         df (pd.DataFrame): Raw data containing model trajectories
+        max_concurrent (int): Maximum number of concurrent API calls to make
 
     Returns:
         pd.DataFrame: Processed evaluation dataframe with graded responses
     """
     eval_df = utils.create_eval_df(df)
-    eval_df = await utils.run_eval_loop(eval_df)
+    eval_df = await utils.run_eval_loop(eval_df, max_concurrent=max_concurrent)
 
     # Create correct column for open ended questions
     eval_df.loc[eval_df.question_format == "open", "correct"] = eval_df.loc[
@@ -168,6 +169,7 @@ async def run_majority_vote(
             random_baselines=random_baselines,
             random_baselines_labels=random_baselines_labels,
             results_dir=results_dir,
+            save_to_root=False,  # Changed to False to prevent overwriting in root directory
         )
 
     return run_results
@@ -224,7 +226,12 @@ async def compare_runs(
     results = utils.calculate_results(
         eval_df, total_questions_per_run=total_questions_per_run
     )
-    print(results)
+    # Print results in a more readable format
+    for run_name, metrics in results.items():
+        mean_percent = metrics['mean'] * 100
+        ci_low_percent = metrics['ci_low'] * 100
+        ci_high_percent = metrics['ci_high'] * 100
+        print(f"{run_name}: {mean_percent:.2f}% (CI: {ci_low_percent:.2f}%-{ci_high_percent:.2f}%)")
 
     if replicate_paper_results:
         # Plot results using the detailed paper plotting
@@ -236,6 +243,7 @@ async def compare_runs(
             group_titles=group_titles,
             random_baselines=random_baselines,
             results_dir=results_dir,
+            save_to_root=False,  # Changed to False to prevent overwriting in root directory
         )
     else:
         # Use simplified plotting
@@ -245,17 +253,19 @@ async def compare_runs(
             group_titles=group_titles,
             has_mcq=any("mcq" in run for run in flat_run_names),
             results_dir=results_dir,
+            save_to_root=False,  # Changed to False to prevent overwriting in root directory
         )
 
     return results
 
 
-async def load_or_process_data(config) -> pd.DataFrame:
+async def load_or_process_data(config, max_concurrent: int = 5) -> pd.DataFrame:
     """
     Load data from files or process trajectories based on configuration.
 
     Args:
         config: Configuration object with data paths and processing options
+        max_concurrent (int): Maximum number of concurrent API calls to make
 
     Returns:
         pd.DataFrame: Processed evaluation dataframe
@@ -273,7 +283,7 @@ async def load_or_process_data(config) -> pd.DataFrame:
                 "please follow the readme to download the raw trajectory data"
             )
         data = load_raw_data(trajectory_path)
-        return await process_trajectories(data)
+        return await process_trajectories(data, max_concurrent=max_concurrent)
 
     # Case 2: Replicating paper results from pre-computed eval_df
     if replicate_paper_results.run and (not replicate_paper_results.from_trajectories):
@@ -289,15 +299,16 @@ async def load_or_process_data(config) -> pd.DataFrame:
 
     # Case 3: Running new analysis from raw data
     data = load_raw_data(data_path)
-    return await process_trajectories(data)
+    return await process_trajectories(data, max_concurrent=max_concurrent)
 
 
-async def main(config_path: str):
+async def main(config_path: str, max_concurrent: int = 5):
     """
     Main function to run BixBench postprocessing based on YAML configuration.
 
     Args:
         config_path (str): Path to the YAML configuration file
+        max_concurrent (int): Maximum number of concurrent API calls to make
     """
     # Load configuration
     with open(config_path, encoding="utf-8") as f:
@@ -311,7 +322,7 @@ async def main(config_path: str):
     os.makedirs(results_dir, exist_ok=True)
 
     # Load or process data based on configuration
-    eval_df = await load_or_process_data(config)
+    eval_df = await load_or_process_data(config, max_concurrent=max_concurrent)
 
     # Save intermediary processed data for debugging
     if config.debug | (config.replicate_paper_results.from_trajectories):
@@ -337,8 +348,63 @@ if __name__ == "__main__":
     parser.add_argument(
         "config_file", type=str, help="Path to the YAML configuration file"
     )
+    parser.add_argument(
+        "--max_concurrent", type=int, default=5, 
+        help="Maximum number of concurrent API calls to make (default: 5)"
+    )
+    parser.add_argument(
+        "--use-new-structure", action="store_true",
+        help="Use the new folder structure (runs/run_id/...)"
+    )
+    parser.add_argument(
+        "--run-id", type=str,
+        help="Run ID for the new folder structure (only used with --use-new-structure)"
+    )
 
     args = parser.parse_args()
-
-    # Run main function with the config file
-    asyncio.run(main(args.config_file))
+    
+    # If using new structure, we need to modify the config after loading
+    async def main_with_new_structure():
+        # Load configuration
+        with open(args.config_file, encoding="utf-8") as f:
+            config_dict = yaml.safe_load(f)
+        
+        # Update config for new structure if requested
+        if args.use_new_structure:
+            config_dict["use_new_structure"] = True
+            if args.run_id:
+                config_dict["run_id"] = args.run_id
+        
+        # Parse configuration with Pydantic
+        config = PostprocessingConfig.model_validate(config_dict)
+        
+        # Set up results directory
+        results_dir = config.results_dir
+        os.makedirs(results_dir, exist_ok=True)
+        
+        # Load or process data based on configuration
+        eval_df = await load_or_process_data(config, max_concurrent=args.max_concurrent)
+        
+        # Save intermediary processed data for debugging
+        if config.debug | (config.replicate_paper_results.from_trajectories):
+            eval_df.to_csv(f"{results_dir}/eval_df_new.csv", index=False)
+        
+        # Run majority vote if configured
+        if config.majority_vote.run:
+            await run_majority_vote(eval_df, config.majority_vote, results_dir)
+        
+        # Run comparison if configured
+        if config.run_comparison.run:
+            await compare_runs(
+                eval_df,
+                config.run_comparison,
+                results_dir,
+                config.replicate_paper_results.run,
+            )
+    
+    # Run with support for new structure
+    if args.use_new_structure:
+        asyncio.run(main_with_new_structure())
+    else:
+        # Run main function with the config file and max_concurrent parameter
+        asyncio.run(main(args.config_file, args.max_concurrent))

@@ -1,6 +1,10 @@
 # DISCLAIMER: This file is highly tailored to the BixBench paper requirements.
 # It is not designed to be used as a general function for plotting model performance.
 
+# Note: This file has been modified to handle negative confidence interval values
+# that can occur with small sample sizes (e.g., in mini mode). Matplotlib does not
+# allow negative error bar values, so we ensure all error bar values are non-negative.
+
 from typing import Optional
 
 import matplotlib.pyplot as plt
@@ -24,6 +28,7 @@ def majority_vote_accuracy_by_k(
     random_baselines: Optional[list[float]] = None,
     random_baselines_labels: Optional[list[str]] = None,
     results_dir: str = "bixbench_results",
+    save_to_root: bool = False,
 ) -> None:
     """
     Plot the accuracy of majority voting as a function of the number of votes (k).
@@ -34,6 +39,7 @@ def majority_vote_accuracy_by_k(
         random_baselines: List of accuracy values for random baseline models
         random_baselines_labels: Labels for the random baseline models
         results_dir: Directory to save results
+        save_to_root: If True, also save the figure to the root directory
 
     Returns:
         None: Saves the plot to disk and displays it
@@ -46,10 +52,16 @@ def majority_vote_accuracy_by_k(
     if random_baselines is None:
         random_baselines = [0.2, 0.25]
     plt.figure(figsize=(15, 6))
-
+    
+    # Check if we have any valid results
+    has_valid_data = False
+    all_k_values = []
+    
     for run_name, (k_values, means, stds) in run_results.items():
-        if k_values is None:
+        if k_values is None or len(k_values) == 0:
             continue
+        has_valid_data = True
+        all_k_values.extend(k_values)
         plt.plot(k_values, means, "o-", label=run_name)
         plt.fill_between(
             k_values,
@@ -57,6 +69,20 @@ def majority_vote_accuracy_by_k(
             [m + s for m, s in zip(means, stds, strict=True)],
             alpha=0.2,
         )
+    
+    # If no valid data, display a message and create an empty plot
+    if not has_valid_data:
+        plt.text(0.5, 0.5, "Insufficient data for majority voting analysis", 
+                 horizontalalignment='center', verticalalignment='center',
+                 transform=plt.gca().transAxes, fontsize=14)
+        plt.xlabel("Number of Votes (k)", fontsize=18)
+        plt.ylabel("Accuracy", fontsize=18)
+        plt.title("Majority Voting Accuracy (No Data)", fontsize=18)
+        plt.savefig(f"{results_dir}/majority_vote_accuracy_{name}.png")
+        if save_to_root:
+            plt.savefig(f"majority_vote_accuracy_{name}.png")
+        plt.close()
+        return
 
     plt.xlabel("Number of Votes (k)", fontsize=18)
     plt.ylabel("Accuracy", fontsize=18)
@@ -68,7 +94,16 @@ def majority_vote_accuracy_by_k(
         fontsize=18,
     )
     plt.title("Majority Voting Accuracy", fontsize=18)
-    plt.xticks(k_values, fontsize=18)
+    
+    # Use all_k_values for xticks if there's valid data
+    if all_k_values:
+        # Remove duplicates and sort
+        unique_k_values = sorted(list(set(all_k_values)))
+        plt.xticks(unique_k_values, fontsize=18)
+    else:
+        # Fallback to standard range if no k_values available
+        plt.xticks(range(1, 10), fontsize=18)
+        
     plt.gca().yaxis.set_major_formatter(ticker.FormatStrFormatter("%.2f"))
 
     for i, (baseline, label) in enumerate(
@@ -83,7 +118,9 @@ def majority_vote_accuracy_by_k(
     plt.legend(loc="upper left")
     plt.grid(alpha=0.3, visible=True)
     plt.savefig(f"{results_dir}/majority_vote_accuracy_{name}.png")
-    plt.show()
+    if save_to_root:
+        plt.savefig(f"majority_vote_accuracy_{name}.png")
+    plt.close()
 
 
 def plot_model_comparison(
@@ -94,6 +131,7 @@ def plot_model_comparison(
     group_titles: Optional[list[str]] = None,
     random_baselines: Optional[list[float]] = None,
     results_dir: str = "bixbench_results",
+    save_to_root: bool = False,
 ) -> None:
     """
     Create a bar chart comparing model performance across different formats.
@@ -106,6 +144,7 @@ def plot_model_comparison(
         group_titles: Optional list of titles for each group
         random_baselines: Optional list of random baseline values for each group
         results_dir: Directory to save results
+        save_to_root: If True, also save the figure to the root directory
 
     Returns:
         None: Saves the plot to disk and displays it
@@ -140,7 +179,9 @@ def plot_model_comparison(
     plt.grid(visible=True, axis="y", linestyle="--", alpha=0.7)
     plt.tight_layout()
     plt.savefig(f"{results_dir}/bixbench_results_comparison.png")
-    plt.show()
+    if save_to_root:
+        plt.savefig("bixbench_results_comparison.png")
+    plt.close()
 
 
 def draw_baselines(
@@ -230,9 +271,10 @@ def draw_model_bars(
             mean = results[run_name]["mean"]
             ci_low = results[run_name]["ci_low"]
             ci_high = results[run_name]["ci_high"]
+            # Ensure yerr values are non-negative (matplotlib requirement)
             yerr = np.array([
-                [mean - ci_low],
-                [ci_high - mean],
+                [max(0, mean - ci_low)],
+                [max(0, ci_high - mean)],
             ])
             label, color = next(
                 [group, color]
@@ -257,6 +299,7 @@ def plot_simplified_comparison(
     group_titles: Optional[list[str]] = None,
     has_mcq: bool = False,
     results_dir: str = "bixbench_results",
+    save_to_root: bool = False,
 ) -> None:
     """
     Create a simplified bar chart comparing model performance.
@@ -267,6 +310,7 @@ def plot_simplified_comparison(
         group_titles: Optional titles for each group
         has_mcq: Whether the results include MCQ questions (to show random baselines)
         results_dir: Directory to save results
+        save_to_root: If True, also save the figure to the root directory
 
     Returns:
         None: Saves the plot to disk and displays it
@@ -293,7 +337,8 @@ def plot_simplified_comparison(
             mean = result["mean"]
             ci_low = result["ci_low"]
             ci_high = result["ci_high"]
-            yerr = np.array([[mean - ci_low], [ci_high - mean]])
+            # Ensure yerr values are non-negative (matplotlib requirement)
+            yerr = np.array([[max(0, mean - ci_low)], [max(0, ci_high - mean)]])
 
             # Calculate bar position
             pos = x_axis[i] + (j - len(group) / 2 + 0.5) * width
@@ -324,7 +369,9 @@ def plot_simplified_comparison(
     plt.legend(loc="best")
     plt.grid(visible=True, axis="y", linestyle="--", alpha=0.7)
 
-    # Save and show plot
+    # Save and close plot
     plt.tight_layout()
     plt.savefig(f"{results_dir}/model_comparison.png")
-    plt.show()
+    if save_to_root:
+        plt.savefig("model_comparison.png")
+    plt.close()
